@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Story Script Generator (AI)</title>
+  <!--
+  HOW TO WIRE AI (choose one):
+
+  ▶ Recommended: Use a tiny proxy (keeps your API key off the page)
+     - Deploy this Cloudflare Worker (free) with your OpenAI API key as a secret:
+       ---- worker.js (copy into Cloudflare Workers) ----
+       export default {
+         async fetch(req, env) {
+           if (req.method === "OPTIONS") {
+             return new Response(null, { headers: corsHeaders() });
+           }
+           if (req.method !== "POST") {
+             return new Response("Method Not Allowed", { status: 405, headers: corsHeaders() });
+           }
+           const { system, user, model, temperature, max_tokens } = await req.json();
+           const r = await fetch("https://api.openai.com/v1/chat/completions", {
+             method: "POST",
+             headers: {
+               "Content-Type": "application/json",
+               "Authorization": `Bearer ${env.OPENAI_API_KEY}`
+             },
+             body: JSON.stringify({
+               model: model || "gpt-4o-mini",
+               messages: [{ role:"system", content: system }, { role:"user", content: user }],
+               temperature: temperature ?? 0.9,
+               max_tokens: max_tokens ?? 4096
+             })
+           });
+           const j = await r.json();
+           return new Response(JSON.stringify(j), { headers: corsHeaders() });
+         }
+       }
+       function corsHeaders() {
+         return {
+           "Access-Control-Allow-Origin": "*",
+           "Access-Control-Allow-Headers": "Content-Type, Authorization",
+           "Access-Control-Allow-Methods": "POST, OPTIONS",
+           "Content-Type": "application/json"
+         };
+       }
+       -----------------------------------------------
+     - In Cloudflare Dashboard → Workers:
+       • Create Worker, paste code, deploy.
+       • Add secret: OPENAI_API_KEY = <your key>
+     - Copy the worker URL, e.g. https://YOUR-WORKER.workers.dev
+     - In this page’s JS config below, set PROXY_URL to that URL.
+
+  ▶ Local testing only (unsafe for public): put your key in DevTools
+     - Open this page locally (file:// or localhost).
+     - In DevTools Console: localStorage.OPENAI_API_KEY = "sk-...your key..."
+     - This page will call OpenAI directly in your browser.
+     - DO NOT use this on GitHub Pages (exposes your key to everyone).
+
+  Change default lengths: edit TARGET_LENGTH options in the HTML <select>.
+  Change genre list: edit the <option> elements under #g-genre.
+  -->
+  <style>
+    :root{
+      --bg:#0b0b0b;--surface:#161616;--ink:#f2f2f2;--muted:#a8a8a8;--accent:#4da3ff;--border:#2a2a2a;
+      color-scheme: dark light;
+    }
+    @media (prefers-color-scheme: light){
+      :root{--bg:#f6f7f8;--surface:#fff;--ink:#111;--muted:#555;--accent:#0b6dff;--border:#e8e8e8;}
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.45}
+    header{padding:18px 14px 6px;text-align:center}
+    h1{margin:0;font-size:clamp(1.25rem,1rem+1.5vw,2rem)}
+    main{max-width:960px;margin:0 auto;padding:14px}
+    .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+    .tabs{display:flex;gap:6px;border-bottom:1px solid var(--border);padding:8px}
+    .tab{border:1px solid var(--border);border-bottom:none;background:transparent;color:var(--ink);padding:10px 14px;border-top-left-radius:10px;border-top-right-radius:10px;font-weight:600;cursor:pointer}
+    .tab[aria-selected="true"]{background:var(--surface);border-bottom:1px solid var(--surface)}
+    .section{padding:14px}
+    fieldset{border:none;margin:0;padding:0}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .full{grid-column:1 / -1}
+    label{display:block;font-size:.9rem;color:var(--muted);margin:6px 0}
+    input[type="text"],textarea,select{width:100%;border:1px solid var(--border);background:transparent;color:var(--ink);border-radius:10px;padding:10px 12px;font:inherit}
+    textarea{min-height:84px;resize:vertical}
+    .controls{display:flex;flex-wrap:wrap;gap:10px;padding:10px 14px;border-top:1px solid var(--border)}
+    .btn{border:1px solid var(--border);background:var(--surface);color:var(--ink);padding:10px 14px;border-radius:999px;cursor:pointer}
+    .btn.primary{background:var(--accent);color:#fff;border-color:transparent;font-weight:700}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .output{padding:16px;border-top:1px solid var(--border)}
+    .output h2{margin:0 0 6px;font-size:1.1rem}
+    .row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}
+    .hint{color:var(--muted);font-size:.9rem}
+    @media (max-width:760px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Story Script Generator</h1>
+    <p class="hint">AI-powered stories from your brief or a quick genre. Exact target word count. Fresh every time.</p>
+  </header>
+
+  <main>
+    <section class="card" aria-labelledby="builder">
+      <div class="tabs" role="tablist" aria-label="Mode">
+        <button id="tab-custom" class="tab" role="tab" aria-controls="panel-custom" aria-selected="true">Custom Brief</button>
+        <button id="tab-genre"  class="tab" role="tab" aria-controls="panel-genre"  aria-selected="false">Quick Genre</button>
+      </div>
+
+      <!-- Custom Brief -->
+      <div id="panel-custom" class="section" role="tabpanel" aria-labelledby="tab-custom">
+        <form id="form-custom" autocomplete="off">
+          <fieldset class="grid">
+            <div class="full">
+              <label for="c-title">Title (optional)</label>
+              <input id="c-title" name="title" type="text" placeholder="e.g., The Last Lantern on Breakwater Road" />
+            </div>
+            <div class="full">
+              <label for="c-protagonists">Protagonist(s) and key traits</label>
+              <textarea id="c-protagonists" name="protagonists" placeholder="e.g., Mara Alvarez, patient maritime investigator; Eli, quiet diver with sharp memory"></textarea>
+            </div>
+            <div class="full">
+              <label for="c-setting">Setting and time period</label>
+              <textarea id="c-setting" name="setting" placeholder="e.g., Fog-soaked coastal town in Oregon, late autumn, present day"></textarea>
+            </div>
+            <div class="full">
+              <label for="c-conflict">Premise or conflict</label>
+              <textarea id="c-conflict" name="conflict" placeholder="e.g., A missing lighthouse keeper and a brine-stained ledger"></textarea>
+            </div>
+            <div class="full">
+              <label for="c-constraints">Required elements or constraints (comma list)</label>
+              <input id="c-constraints" name="constraints" type="text" placeholder="e.g., chipped compass, sea glass, unreliable witness" />
+            </div>
+            <div>
+              <label for="c-tone">Desired tone</label>
+              <select id="c-tone" name="tone">
+                <option>light</option><option>dark</option><option>hopeful</option>
+                <option>bleak</option><option>whimsical</option><option selected>serious</option>
+              </select>
+            </div>
+            <div>
+              <label for="c-pov">Point of view</label>
+              <select id="c-pov" name="pov">
+                <option>first</option><option selected>third limited</option><option>third omniscient</option>
+              </select>
+            </div>
+            <div>
+              <label for="c-tense">Tense</label>
+              <select id="c-tense" name="tense">
+                <option selected>past</option><option>present</option>
+              </select>
+            </div>
+            <div>
+              <label for="c-length">Target length (words)</label>
+              <select id="c-length" name="length">
+                <option>600</option><option selected>1200</option><option>2500</option>
+              </select>
+            </div>
+          </fieldset>
+        </form>
+      </div>
+
+      <!-- Quick Genre -->
+      <div id="panel-genre" class="section" role="tabpanel" aria-labelledby="tab-genre" hidden>
+        <form id="form-genre" autocomplete="off">
+          <fieldset class="grid">
+            <div class="full">
+              <label for="g-genre">Genre</label>
+              <select id="g-genre" name="genre">
+                <option>Fantasy</option><option>Science Fiction</option><option selected>Mystery</option>
+                <option>Thriller</option><option>Horror</option><option>Romance</option>
+                <option>Historical</option><option>Literary</option><option>Adventure</option>
+                <option>Cyberpunk</option><option>YA</option><option>Dystopian</option>
+                <option>Western</option><option>Contemporary</option>
+              </select>
+            </div>
+            <div>
+              <label for="g-tone">Desired tone</label>
+              <select id="g-tone" name="tone">
+                <option>light</option><option>dark</option><option>hopeful</option>
+                <option>bleak</option><option>whimsical</option><option selected>serious</option>
+              </select>
+            </div>
+            <div>
+              <label for="g-pov">Point of view</label>
+              <select id="g-pov" name="pov">
+                <option>first</option><option selected>third limited</option><option>third omniscient</option>
+              </select>
+            </div>
+            <div>
+              <label for="g-tense">Tense</label>
+              <select id="g-tense" name="tense">
+                <option selected>past</option><option>present</option>
+              </select>
+            </div>
+            <div>
+              <label for="g-length">Target length (words)</label>
+              <select id="g-length" name="length">
+                <option>600</option><option selected>1200</option><option>2500</option>
+              </select>
+            </div>
+          </fieldset>
+        </form>
+      </div>
+
+      <div class="controls" aria-live="polite" aria-atomic="true">
+        <button id="btn-generate"   class="btn primary" type="button">Generate</button>
+        <button id="btn-regenerate" class="btn" type="button" disabled>Regenerate</button>
+        <button id="btn-clear"      class="btn" type="button">Clear</button>
+        <span class="hint" id="status">Words: 0 / Target 0</span>
+      </div>
+
+      <div class="output" id="output" aria-live="polite" aria-busy="false">
+        <h2 id="out-title">Title will appear here</h2>
+        <div class="row">
+          <button id="btn-copy" class="btn" type="button" disabled>Copy to clipboard</button>
+          <button id="btn-download" class="btn" type="button" disabled>Download as .txt</button>
+        </div>
+        <pre id="out-text" style="white-space:pre-wrap;margin:0;"></pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+  (function(){
+    // ===== CONFIG =====
+    const STORE_KEY = "ssg.ai.v1";
+    const MODEL = "gpt-4o-mini";          // change if needed
+    const TEMPERATURE = 0.95;             // creativity
+    const MAX_REVISIONS = 2;              // max extra passes to hit exact word count
+    const PROXY_URL = "";                 // e.g. "https://YOUR-WORKER.workers.dev" (recommended)
+
+    const $ = s => document.querySelector(s);
+    let lastSettings = null;
+
+    // ===== Tabs =====
+    function switchTab(which, els){
+      const isCustom = which !== "genre";
+      els.tabCustom.setAttribute("aria-selected", String(isCustom));
+      els.tabGenre.setAttribute("aria-selected", String(!isCustom));
+      els.panelCustom.hidden = !isCustom;
+      els.panelGenre.hidden = isCustom;
+      const d = collect(els); d.mode = isCustom ? "custom" : "genre"; save(d);
+    }
+
+    // ===== Persistence =====
+    function save(d){ localStorage.setItem(STORE_KEY, JSON.stringify(d)); }
+    function load(){
+      const def = {
+        mode:"custom",
+        custom:{title:"",protagonists:"",setting:"",conflict:"",constraints:"",tone:"serious",pov:"third limited",tense:"past",length:1200},
+        genre:{genre:"Mystery",tone:"serious",pov:"third limited",tense:"past",length:1200}
+      };
+      try { return Object.assign(def, JSON.parse(localStorage.getItem(STORE_KEY)||"null")||{}); }
+      catch { return def; }
+    }
+    function hydrate(els){
+      const d = load();
+      if(d.mode==="genre") { els.panelCustom.hidden = true; els.panelGenre.hidden = false; els.tabCustom.setAttribute("aria-selected","false"); els.tabGenre.setAttribute("aria-selected","true"); }
+      $("#c-title").value = d.custom.title;
+      $("#c-protagonists").value = d.custom.protagonists;
+      $("#c-setting").value = d.custom.setting;
+      $("#c-conflict").value = d.custom.conflict;
+      $("#c-constraints").value = d.custom.constraints;
+      $("#c-tone").value = d.custom.tone;
+      $("#c-pov").value = d.custom.pov;
+      $("#c-tense").value = d.custom.tense;
+      $("#c-length").value = String(d.custom.length);
+      $("#g-genre").value = d.genre.genre;
+      $("#g-tone").value = d.genre.tone;
+      $("#g-pov").value = d.genre.pov;
+      $("#g-tense").value = d.genre.tense;
+      $("#g-length").value = String(d.genre.length);
+      updateStatusWords(0, d.mode==="custom"?d.custom.length:d.genre.length);
+    }
+    function collect(els){
+      const d = load();
+      const mode = els.panelGenre.hidden ? "custom" : "genre";
+      if(mode==="custom"){
+        d.custom = {
+          title: $("#c-title").value.trim(),
+          protagonists: $("#c-protagonists").value.trim(),
+          setting: $("#c-setting").value.trim(),
+          conflict: $("#c-conflict").value.trim(),
+          constraints: $("#c-constraints").value.trim(),
+          tone: $("#c-tone").value, pov: $("#c-pov").value, tense: $("#c-tense").value, length: Number($("#c-length").value)
+        };
+      } else {
+        d.genre = {
+          genre: $("#g-genre").value, tone: $("#g-tone").value, pov: $("#g-pov").value, tense: $("#g-tense").value, length: Number($("#g-length").value)
+        };
+      }
+      d.mode = mode; save(d); return d;
+    }
+
+    // ===== Prompt Construction =====
+    function randomSeedPhrase(){
+      const A=["lantern","echo","raven","quartz","signal","harbor","cipher","ember","glass","parallax","shadow","threshold","needle","drift"];
+      const B=["wake","ledger","trace","undertow","horizon","map","pattern","mirror","tide","grid","thread","spire","hymn","margin"];
+      return A[Math.floor(Math.random()*A.length)]+"-"+B[Math.floor(Math.random()*B.length)]+"-"+Math.floor(Math.random()*10000);
+    }
+    function generateStoryPrompt(data){
+      const isCustom = data.mode==="custom";
+      const c = data.custom, g = data.genre;
+      const tone = isCustom?c.tone:g.tone, pov=isCustom?c.pov:g.pov, tense=isCustom?c.tense:g.tense, length=isCustom?c.length:g.length;
+      const titleHint = (isCustom && c.title) ? `Optional title hint: ${c.title}` : "";
+      const seed = randomSeedPhrase();
+
+      const system = [
+        "You are an expert novelist.",
+        "Use vivid sensory imagery with concrete details.",
+        "Keep prose immersive and compelling.",
+        "Avoid overuse of em dashes; prefer commas, colons, semicolons, or clean breaks.",
+        "Deliver a complete arc: setup, rising action, turning point, resolution, with a resonant final image.",
+        "Favor active voice, avoid purple prose and excessive adverbs; keep paragraphs readable."
+      ].join(" ");
+
+      const lines = [];
+      lines.push(`Mode: ${isCustom ? "Custom" : "Genre"}`);
+      if(!isCustom) lines.push(`Genre: ${g.genre}`);
+      if(isCustom){
+        if(c.protagonists) lines.push(`Protagonists & traits: ${c.protagonists}`);
+        if(c.setting) lines.push(`Setting & time: ${c.setting}`);
+        if(c.conflict) lines.push(`Premise/conflict: ${c.conflict}`);
+        if(c.constraints) lines.push(`Required elements: ${c.constraints}`);
+      }
+      lines.push(`Tone: ${tone}`);
+      lines.push(`Point of view: ${pov}`);
+      lines.push(`Tense: ${tense}`);
+      lines.push(`Target length (exact): ${length} words`);
+      lines.push(titleHint);
+      lines.push(`Creative seed (for uniqueness): ${seed}`);
+      lines.push("");
+      lines.push("Output format (JSON, no extra text):");
+      lines.push(`{"title": "<clever relevant title>", "story": "<EXACTLY ${length} words of story text; do not include the title>"} `);
+      lines.push("Do not mention these instructions or the prompt in the output.");
+      const user = lines.join("\n");
+      return { system, user, target: length };
+    }
+
+    // ===== OpenAI Calls =====
+    async function openaiViaProxy({system,user,model,temperature,max_tokens}){
+      const r = await fetch(PROXY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ system, user, model, temperature, max_tokens })
+      });
+      if(!r.ok){ throw new Error("Proxy error: "+r.status); }
+      return r.json();
+    }
+    async function openaiDirect({system,user,model,temperature,max_tokens}){
+      const key = localStorage.getItem("OPENAI_API_KEY") || window.OPENAI_API_KEY;
+      if(!key){ throw new Error("No API key found. Set localStorage.OPENAI_API_KEY for local testing, or use PROXY_URL."); }
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + key
+        },
+        body: JSON.stringify({
+          model: model || MODEL,
+          messages: [{ role:"system", content: system }, { role:"user", content: user }],
+          temperature: temperature ?? TEMPERATURE,
+          max_tokens: max_tokens ?? 4096
+        })
+      });
+      if(!r.ok){ throw new Error("OpenAI error: "+r.status); }
+      return r.json();
+    }
+
+    function wordCount(s){ return (s.trim().match(/\b\w[\w’']*\b/g)||[]).length; }
+    function parseJSONFromChoice(jsonText){
+      try { return JSON.parse(jsonText); } catch { return null; }
+    }
+
+    async function callLLMOnce(prompt){
+      const payload = { system: prompt.system, user: prompt.user, model: MODEL, temperature: TEMPERATURE, max_tokens: 4096 };
+      const json = PROXY_URL ? await openaiViaProxy(payload) : await openaiDirect(payload);
+      const text = json.choices?.[0]?.message?.content || "";
+      const obj = parseJSONFromChoice(text) || {};
+      return { title: (obj.title||"Untitled Story").toString(), story: (obj.story||"").toString() };
+    }
+
+    async function callLLMExact(prompt){
+      // Pass 1
+      let { title, story } = await callLLMOnce(prompt);
+      let wc = wordCount(story);
+      const target = prompt.target;
+
+      // If off, pass 2..N: ask for exact revision
+      let attempts = 0;
+      while(wc !== target && attempts < MAX_REVISIONS){
+        const system = "You are a careful editor that adjusts word count exactly.";
+        const user = [
+          `Revise the story to be EXACTLY ${target} words.`,
+          "Do not change the title. Return JSON only:",
+          `{"title":"${title.replace(/"/g,'\\"')}","story":"<EXACTLY ${target} words>"} `,
+          "Keep content coherent and compelling; do not add meta commentary."
+        ].join("\n");
+        const rev = await (PROXY_URL ? openaiViaProxy({system,user,model:MODEL,temperature:0.3,max_tokens:4096})
+                                     : openaiDirect({system,user,model:MODEL,temperature:0.3,max_tokens:4096}));
+        const text = rev.choices?.[0]?.message?.content || "";
+        const obj = parseJSONFromChoice(text) || {};
+        story = (obj.story||story).toString();
+        wc = wordCount(story);
+        attempts++;
+      }
+
+      // Last-resort micro-adjust (trim/pad) if still off
+      if(wc !== target){
+        if(wc > target){
+          const words = story.trim().split(/\s+/);
+          story = words.slice(0, target).join(" ");
+        } else {
+          const filler = "The air held quiet as the moment settled.";
+          const words = story.trim().split(/\s+/);
+          while(words.length < target) { words.push(...filler.split(" ")); }
+          story = words.slice(0, target).join(" ");
+        }
+        wc = target;
+      }
+      return { title, story, wc };
+    }
+
+    // ===== UI wiring =====
+    function updateStatusWords(n, target){
+      $("#status").textContent = `Words: ${n} / Target ${target}`;
+    }
+
+    document.addEventListener("DOMContentLoaded", function(){
+      const els = {
+        tabCustom: $("#tab-custom"), tabGenre: $("#tab-genre"),
+        panelCustom: $("#panel-custom"), panelGenre: $("#panel-genre"),
+        formCustom: $("#form-custom"), formGenre: $("#form-genre"),
+        btnGen: $("#btn-generate"), btnRegen: $("#btn-regenerate"), btnClear: $("#btn-clear"),
+        outTitle: $("#out-title"), outText: $("#out-text"),
+        btnCopy: $("#btn-copy"), btnDownload: $("#btn-download"),
+        status: $("#status"), output: $("#output")
+      };
+      hydrate(els);
+
+      els.tabCustom.addEventListener("click", ()=>switchTab("custom", els));
+      els.tabGenre.addEventListener("click", ()=>switchTab("genre", els));
+      ["input","change"].forEach(evt=>{
+        els.formCustom.addEventListener(evt,()=>collect(els));
+        els.formGenre.addEventListener(evt,()=>collect(els));
+      });
+
+      async function runGenerate(forceFresh=false){
+        const data = collect(els);
+        lastSettings = JSON.parse(JSON.stringify(data));
+        const target = data.mode==="custom" ? data.custom.length : data.genre.length;
+        const { system, user, target: t } = generateStoryPrompt(data);
+        els.output.setAttribute("aria-busy","true");
+        els.btnGen.disabled = true; els.btnRegen.disabled = true; els.btnGen.textContent = "Generating…";
+        try{
+          const res = await callLLMExact({ system, user, target: t });
+          els.outTitle.textContent = res.title || "Untitled Story";
+          els.outText.textContent = res.story || "";
+          els.btnCopy.disabled = !res.story;
+          els.btnDownload.disabled = !res.story;
+          updateStatusWords(res.wc || wordCount(res.story||""), target);
+          els.btnRegen.disabled = false;
+        }catch(e){
+          console.error(e);
+          els.outTitle.textContent = "Error";
+          els.outText.textContent = (e && e.message) ? e.message : "Generation failed.";
+          updateStatusWords(0, target);
+        }finally{
+          els.output.setAttribute("aria-busy","false");
+          els.btnGen.disabled = false; els.btnGen.textContent = "Generate";
+        }
+      }
+
+      els.btnGen.addEventListener("click", ()=>runGenerate(true));
+      els.btnRegen.addEventListener("click", ()=>runGenerate(true));
+
+      els.btnCopy.addEventListener("click", ()=>{
+        const txt = els.outTitle.textContent + "\n\n" + els.outText.textContent;
+        navigator.clipboard.writeText(txt).then(()=>{
+          const d = load(); const t = d.mode==="custom"?d.custom.length:d.genre.length;
+          updateStatusWords(wordCount(els.outText.textContent), t);
+          els.status.textContent = "Copied."; setTimeout(()=>{ updateStatusWords(wordCount(els.outText.textContent), t); }, 1000);
+        });
+      });
+
+      els.btnDownload.addEventListener("click", ()=>{
+        const fname = (els.outTitle.textContent || "story").replace(/[\\/:*?"<>|]/g,"_").slice(0,80);
+        const blob = new Blob([els.outTitle.textContent+"\n\n"+els.outText.textContent], {type:"text/plain;charset=utf-8"});
+        const url = URL.createObjectURL(blob); const a = document.createElement("a");
+        a.href = url; a.download = fname + ".txt"; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      });
+
+      els.btnClear.addEventListener("click", ()=>{
+        localStorage.removeItem(STORE_KEY);
+        hydrate(els);
+        els.outTitle.textContent = "Title will appear here";
+        els.outText.textContent = "";
+        els.btnCopy.disabled = true; els.btnDownload.disabled = true; els.btnRegen.disabled = true;
+      });
+
+      // Cmd/Ctrl+Enter generates
+      document.addEventListener("keydown",(e)=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter") els.btnGen.click(); });
+    });
+  })();
+  </script>
+</body>
+</html>
